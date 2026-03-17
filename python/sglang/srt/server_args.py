@@ -393,6 +393,7 @@ class ServerArgs:
     kv_events_config: Optional[str] = None
     enable_trace: bool = False
     otlp_traces_endpoint: str = "localhost:4317"
+    data_dump_dir: Optional[str] = None
 
     # RequestMetricsExporter configuration
     export_metrics_to_file: bool = False
@@ -3458,6 +3459,13 @@ class ServerArgs:
             type=str,
             default="localhost:4317",
             help="Config opentelemetry collector endpoint if --enable-trace is set. format: <ip>:<port>",
+        )
+        parser.add_argument(
+            "--data-dump-dir",
+            type=str,
+            default=ServerArgs.data_dump_dir,
+            help="Directory path for dumping request input/output data to a JSONL file. "
+            "Each completed request will be recorded with input, input_time, input_length, output, output_length and request_id.",
         )
 
         # RequestMetricsExporter configuration

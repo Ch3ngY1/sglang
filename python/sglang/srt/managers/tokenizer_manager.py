@@ -109,6 +109,7 @@ from sglang.srt.utils import (
     kill_process_tree,
 )
 from sglang.srt.utils.aio_rwlock import RWLock
+from sglang.srt.utils.data_dumper import DataDumper
 from sglang.srt.utils.hf_transformers_utils import (
     get_processor,
     get_tokenizer,
@@ -378,6 +379,16 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         self.request_metrics_exporter_manager = RequestMetricsExporterManager(
             self.server_args, obj_skip_names, out_skip_names
         )
+
+        # Data dumper for input/output recording
+        if self.server_args.data_dump_dir:
+            server_args_dict = dataclasses.asdict(self.server_args)
+            self.data_dumper = DataDumper(
+                dump_dir=self.server_args.data_dump_dir,
+                server_args_dict=server_args_dict,
+            )
+        else:
+            self.data_dumper = None
 
     def init_weight_update(self):
         # Initial weights status
@@ -1149,6 +1160,14 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         self.request_metrics_exporter_manager.write_record(obj, out)
                     )
 
+                # Dump request data if data_dump_dir is configured
+                # In PD disaggregation, only the decode instance dumps data
+                if (
+                    self.data_dumper is not None
+                    and self.disaggregation_mode != DisaggregationMode.PREFILL
+                ):
+                    self._dump_request_data(obj, out, state)
+
                 # Check if this was an abort/error created by scheduler
                 if isinstance(out["meta_info"].get("finish_reason"), dict):
                     finish_reason = out["meta_info"]["finish_reason"]
@@ -1210,6 +1229,47 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     raise ValueError(
                         f"Request is disconnected from the client side (type 3). Abort request {obj.rid=}"
                     )
+
+    def _dump_request_data(
+        self,
+        obj: Union[GenerateReqInput, EmbeddingReqInput],
+        out: dict,
+        state: ReqState,
+    ):
+        """Dump request input/output data to JSONL file."""
+        try:
+            meta_info = out.get("meta_info", {})
+            # Get input text: decode from input_ids if text is not available
+            input_text = obj.text
+            if input_text is None and obj.input_ids is not None:
+                if self.tokenizer is not None:
+                    input_text = self.tokenizer.decode(
+                        obj.input_ids, skip_special_tokens=False
+                    )
+                else:
+                    input_text = str(obj.input_ids)
+            # Get output text
+            output_text = out.get("text", "")
+            if not output_text and state.output_ids:
+                if self.tokenizer is not None:
+                    output_text = self.tokenizer.decode(
+                        state.output_ids, skip_special_tokens=False
+                    )
+                else:
+                    output_text = str(state.output_ids)
+            record = {
+                "rid": meta_info.get("id", obj.rid),
+                "input": input_text,
+                "input_time": datetime.fromtimestamp(state.created_time).strftime(
+                    "%Y-%m-%d %H:%M:%S.%f"
+                ),
+                "input_length": meta_info.get("prompt_tokens", 0),
+                "output": output_text,
+                "output_length": meta_info.get("completion_tokens", 0),
+            }
+            self.data_dumper.dump_record(record)
+        except Exception as e:
+            logger.error(f"Failed to dump request data: {e}")
 
     async def _handle_batch_request(
         self,
