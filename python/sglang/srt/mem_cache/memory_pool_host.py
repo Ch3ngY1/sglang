@@ -840,9 +840,15 @@ class MLATokenToKVPoolHost(HostKVCache):
         self.kv_lora_rank = self.device_pool.kv_lora_rank
         self.qk_rope_head_dim = self.device_pool.qk_rope_head_dim
         self.layer_num = self.device_pool.layer_num
-        self.kv_cache_dim = self.override_kv_cache_dim or (
-            self.kv_lora_rank + self.qk_rope_head_dim
-        )
+        # Mirror the device pool's actual kv_cache_dim so that the host buffer
+        # stride matches the device stride byte-for-byte.  For standard MLA the
+        # device pool sets kv_cache_dim = kv_lora_rank + qk_rope_head_dim, so
+        # this is a no-op.  For NSA + FP8 the device pool stores extra scale
+        # bytes per token (override_kv_cache_dim > kv_lora_rank +
+        # qk_rope_head_dim); using the raw sum would under-size the host buffer
+        # and cause cudaMemcpyBatchAsync to report "invalid argument" when the
+        # C++ transfer kernel walks past the end of the allocation.
+        self.kv_cache_dim = self.override_kv_cache_dim or self.device_pool.kv_cache_dim
         return self.kv_cache_dim * self.dtype.itemsize * self.layer_num
 
     def get_ksize_per_token(self):
